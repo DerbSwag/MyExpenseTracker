@@ -23,9 +23,11 @@
 package com.example.myexpensetracker
 
 import android.Manifest
+import android.app.DatePickerDialog
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
@@ -87,12 +89,14 @@ import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.firestore
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.*
@@ -170,6 +174,8 @@ class ExpenseViewModel : ViewModel() {
 
     private val _recurring = MutableStateFlow<List<RecurringItem>>(emptyList())
     val recurring: StateFlow<List<RecurringItem>> = _recurring
+
+    val shownAlerts = mutableSetOf<String>()
 
     init {
         listenTransactions()
@@ -321,9 +327,7 @@ fun pushNotification(ctx: Context, title: String, body: String) {
         NotificationManagerCompat.from(ctx).notify(System.currentTimeMillis().toInt(), n)
 }
 
-private val shownAlerts = mutableSetOf<String>()
-
-fun checkBudgetNotifications(ctx: Context, transactions: List<Transaction>, budgets: Map<String, Double>) {
+fun checkBudgetNotifications(ctx: Context, transactions: List<Transaction>, budgets: Map<String, Double>, shownAlerts: MutableSet<String>) {
     val prefix = SimpleDateFormat("yyyy-MM", Locale.getDefault()).format(Date())
     val moExp  = transactions.filter { it.date.startsWith(prefix) && it.type == "expense" }
     CATEGORIES.forEach { cat ->
@@ -388,7 +392,7 @@ fun ExpenseTrackerApp(
 
     LaunchedEffect(transactions, budgets) {
         if (transactions.isNotEmpty() && budgets.isNotEmpty())
-            checkBudgetNotifications(ctx, transactions, budgets)
+            checkBudgetNotifications(ctx, transactions, budgets, vm.shownAlerts)
     }
 
     Scaffold(bottomBar = { BottomNav(nav) }) { pad ->
@@ -414,7 +418,7 @@ fun BottomNav(nav: NavController) {
     NavigationBar {
         NavigationBarItem(selected = cur == "home",    onClick = { nav.navigate("home")    { launchSingleTop = true } }, icon = { Icon(Icons.Default.List,     null) }, label = { Text("รายการ") })
         NavigationBarItem(selected = cur == "add",     onClick = { nav.navigate("add")     { launchSingleTop = true } }, icon = { Icon(Icons.Default.Add,      null) }, label = { Text("บันทึก") })
-        NavigationBarItem(selected = cur == "summary", onClick = { nav.navigate("summary") { launchSingleTop = true } }, icon = { Icon(Icons.Default.Star,     null) }, label = { Text("สรุป") })
+        NavigationBarItem(selected = cur == "summary", onClick = { nav.navigate("summary") { launchSingleTop = true } }, icon = { Icon(Icons.Default.BarChart,  null) }, label = { Text("สรุป") })
         NavigationBarItem(selected = cur == "budget",  onClick = { nav.navigate("budget")  { launchSingleTop = true } }, icon = { Icon(Icons.Default.AccountBalance, null) }, label = { Text("งบ") })
         NavigationBarItem(selected = cur == "recur",   onClick = { nav.navigate("recur")   { launchSingleTop = true } }, icon = { Icon(Icons.Default.Refresh,  null) }, label = { Text("ประจำ") })
     }
@@ -434,6 +438,7 @@ fun TransactionListScreen(
 ) {
     val transactions by vm.transactions.collectAsState()
     val cal = Calendar.getInstance()
+    val ctx = LocalContext.current
     var year    by remember { mutableStateOf(cal.get(Calendar.YEAR))  }
     var month   by remember { mutableStateOf(cal.get(Calendar.MONTH)) }
     var search  by remember { mutableStateOf("") }
@@ -483,7 +488,7 @@ fun TransactionListScreen(
                             tint = if (filterCat != null) MaterialTheme.colorScheme.primary else LocalContentColor.current)
                     }
                     // CSV Export
-                    IconButton(onClick = { exportCSV(monthTx) }) { Icon(Icons.Default.Download, null) }
+                    IconButton(onClick = { exportCSV(ctx, monthTx) }) { Icon(Icons.Default.Download, null) }
                     // Dark mode toggle
                     IconButton(onClick = onToggle) {
                         Icon(if (isDark) Icons.Default.WbSunny else Icons.Default.DarkMode, null)
@@ -742,10 +747,31 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
 
             // Date
             item {
-                OutlinedTextField(value = date, onValueChange = { date = it },
-                    label = { Text("วันที่ (yyyy-MM-dd)") }, modifier = Modifier.fillMaxWidth(),
+                val cal = Calendar.getInstance()
+                // Parse existing date
+                try {
+                    val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                    sdf.parse(date)?.let { cal.time = it }
+                } catch (_: Exception) {}
+
+                OutlinedTextField(
+                    value = date, onValueChange = {},
+                    readOnly = true,
+                    label = { Text("วันที่") }, modifier = Modifier.fillMaxWidth().clickable {
+                        DatePickerDialog(ctx, { _, y, m, d ->
+                            date = "%04d-%02d-%02d".format(y, m + 1, d)
+                        }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show()
+                    },
                     singleLine = true, shape = RoundedCornerShape(12.dp),
-                    leadingIcon = { Icon(Icons.Default.CalendarMonth, null) })
+                    leadingIcon = { Icon(Icons.Default.CalendarMonth, null) },
+                    enabled = false,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                        disabledBorderColor = MaterialTheme.colorScheme.outline,
+                        disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        disabledLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                )
             }
 
             // Receipt camera
@@ -890,9 +916,9 @@ fun BudgetScreen(vm: ExpenseViewModel) {
     val budgets      by vm.budgets.collectAsState()
     val transactions by vm.transactions.collectAsState()
     val cal   = Calendar.getInstance()
-    val month = cal.get(Calendar.MONTH)
-    val year  = cal.get(Calendar.YEAR)
-    val monthTx = remember(transactions) { vm.getMonthTx(year, month) }
+    var month by remember { mutableStateOf(cal.get(Calendar.MONTH)) }
+    var year  by remember { mutableStateOf(cal.get(Calendar.YEAR)) }
+    val monthTx = remember(transactions, year, month) { vm.getMonthTx(year, month) }
 
     var editCat    by remember { mutableStateOf<Category?>(null) }
     var bdgInput   by remember { mutableStateOf("") }
@@ -917,6 +943,10 @@ fun BudgetScreen(vm: ExpenseViewModel) {
 
     Scaffold(topBar = { TopAppBar(title = { Text("💰 งบประมาณ", fontWeight = FontWeight.Bold) }) }) { pad ->
         LazyColumn(Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item { MonthNav(year, month,
+                { if (month == 0) { month = 11; year-- } else month-- },
+                { if (month == 11) { month = 0; year++ } else month++ }
+            ) }
             item { Text("${MONTH_TH[month]} ${year + 543} — แตะเพื่อตั้งงบ", fontSize = 13.sp, color = MaterialTheme.colorScheme.outline) }
             items(CATEGORIES.filter { it.id != "salary" }) { cat ->
                 val bdg   = budgets[cat.id] ?: 0.0
@@ -1068,23 +1098,27 @@ fun RecurringScreen(vm: ExpenseViewModel, ctx: Context) {
 //  CSV EXPORT
 // ═══════════════════════════════════════════════════════════════
 
-fun exportCSV(transactions: List<Transaction>) {
-    // สร้าง CSV string แล้ว share ด้วย Intent
+fun exportCSV(ctx: Context, transactions: List<Transaction>) {
     val sb = StringBuilder()
     sb.appendLine("วันที่,ประเภท,หมวดหมู่,หมายเหตุ,จำนวนเงิน (บาท),ประจำ")
     transactions.forEach { t ->
         val cat = catById(t.category).label.replace(",", "")
-        sb.appendLine("${t.date},${if (t.type == "income") "รายรับ" else "รายจ่าย"},$cat,${t.note},${t.amount},${if (t.isRecurring) "ใช่" else "ไม่"}")
+        val note = t.note.replace(",", " ").replace("\n", " ")
+        sb.appendLine("${t.date},${if (t.type == "income") "รายรับ" else "รายจ่าย"},$cat,$note,${t.amount},${if (t.isRecurring) "ใช่" else "ไม่"}")
     }
-    Log.d("CSV_EXPORT", sb.toString())
-    // NOTE: เพื่อ share ไฟล์จริงต้องใช้ FileProvider — ดูตัวอย่างด้านล่าง
-    // val file = File(ctx.getExternalFilesDir(null), "expense_${Date().time}.csv")
-    // file.writeText("\uFEFF$sb") // UTF-8 BOM สำหรับ Excel
-    // val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", file)
-    // ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-    //     type = "text/csv"; putExtra(Intent.EXTRA_STREAM, uri)
-    //     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    // }, "Export CSV"))
+    try {
+        val file = File(ctx.getExternalFilesDir(null), "expense_${System.currentTimeMillis()}.csv")
+        file.writeText("\uFEFF$sb") // UTF-8 BOM สำหรับ Excel
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", file)
+        ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+            type = "text/csv"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }, "Export CSV"))
+    } catch (e: Exception) {
+        Toast.makeText(ctx, "ไม่สามารถ export ได้: ${e.message}", Toast.LENGTH_SHORT).show()
+        Log.e("CSV_EXPORT", e.message ?: "")
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
