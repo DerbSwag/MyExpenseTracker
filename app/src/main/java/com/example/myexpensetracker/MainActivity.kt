@@ -592,7 +592,7 @@ fun TxItem(tx: Transaction, onEdit: () -> Unit, onDelete: () -> Unit, onReceipt:
     Card(Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape  = RoundedCornerShape(14.dp)) {
-        Row(Modifier.padding(12.dp), Alignment.CenterVertically, Arrangement.spacedBy(11.dp)) {
+        Row(Modifier.padding(12.dp), Arrangement.spacedBy(11.dp), Alignment.CenterVertically) {
             // Icon
             Box(Modifier.size(44.dp).clip(RoundedCornerShape(13.dp)).background(cat.color.copy(.22f)), Alignment.Center) {
                 Text(cat.emoji, fontSize = 21.sp)
@@ -1035,7 +1035,7 @@ fun RecurringScreen(vm: ExpenseViewModel, ctx: Context) {
                     val cat = catById(item.category)
                     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                        Row(Modifier.padding(13.dp), Alignment.CenterVertically, Arrangement.spacedBy(10.dp)) {
+                        Row(Modifier.padding(13.dp), Arrangement.spacedBy(10.dp), Alignment.CenterVertically) {
                             Box(Modifier.size(40.dp).clip(RoundedCornerShape(11.dp)).background(cat.color.copy(.2f)), Alignment.Center) { Text(cat.emoji, fontSize = 19.sp) }
                             Column(Modifier.weight(1f)) {
                                 Text(item.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
