@@ -1,23 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-//  MainActivity.kt  —  Expense Tracker v2
-//
-//  build.gradle (app) — dependencies:
-//  implementation("com.google.firebase:firebase-firestore-ktx")
-//  implementation("com.google.firebase:firebase-messaging-ktx")
-//  implementation("androidx.navigation:navigation-compose:2.7.7")
-//  implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
-//  implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-//  implementation("androidx.datastore:datastore-preferences:1.1.1")
-//  implementation("io.coil-kt:coil-compose:2.6.0")   ← แสดงรูป
-//
-//  settings.gradle → repositories: maven { url = uri("https://jitpack.io") }
-//
-//  AndroidManifest.xml — เพิ่ม:
-//  <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-//  <uses-permission android:name="android.permission.CAMERA"/>
-//  <service android:name=".MyFirebaseMessagingService" android:exported="false">
-//    <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT"/></intent-filter>
-//  </service>
+//  MainActivity.kt  —  Expense Tracker v3 (with Firebase Auth)
 // ═══════════════════════════════════════════════════════════════
 
 package com.example.myexpensetracker
@@ -62,6 +44,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -70,6 +54,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.FileProvider
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -85,14 +70,14 @@ import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.data.*
 import com.github.mikephil.charting.formatter.IndexAxisValueFormatter
 import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.auth
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.firestore
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
-import androidx.core.content.FileProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
@@ -146,7 +131,7 @@ data class Transaction(
     val date: String         = "",
     val createdAt: Long      = 0L,
     val isRecurring: Boolean = false,
-    val receipt: String?     = null,  // base64
+    val receipt: String?     = null,
 )
 
 data class RecurringItem(
@@ -155,16 +140,17 @@ data class RecurringItem(
     val category: String = "other",
     val amount: Double = 0.0,
     val name: String   = "",
-    val freq: String   = "monthly",  // "monthly" | "weekly"
+    val freq: String   = "monthly",
     val day: Int       = 1,
 )
 
 // ═══════════════════════════════════════════════════════════════
-//  VIEWMODEL
+//  VIEWMODEL — ข้อมูลแยกตาม user UID
 // ═══════════════════════════════════════════════════════════════
 
 class ExpenseViewModel : ViewModel() {
     private val db = Firebase.firestore
+    private val auth = Firebase.auth
 
     private val _transactions = MutableStateFlow<List<Transaction>>(emptyList())
     val transactions: StateFlow<List<Transaction>> = _transactions
@@ -177,15 +163,28 @@ class ExpenseViewModel : ViewModel() {
 
     val shownAlerts = mutableSetOf<String>()
 
-    init {
+    private val uid: String? get() = auth.currentUser?.uid
+
+    // ── Path helpers (per-user) ────────────────────────────────
+    private fun txCol()      = db.collection("users").document(uid ?: "anon").collection("transactions")
+    private fun settingsDoc() = db.collection("users").document(uid ?: "anon").collection("settings")
+
+    fun startListening() {
+        if (uid == null) return
         listenTransactions()
         listenBudgets()
         listenRecurring()
     }
 
+    fun clearData() {
+        _transactions.value = emptyList()
+        _budgets.value = emptyMap()
+        _recurring.value = emptyList()
+        shownAlerts.clear()
+    }
+
     private fun listenTransactions() {
-        db.collection("transactions")
-            .orderBy("createdAt", Query.Direction.DESCENDING)
+        txCol().orderBy("createdAt", Query.Direction.DESCENDING)
             .addSnapshotListener { snap, err ->
                 if (err != null) { Log.e("FS", err.message ?: ""); return@addSnapshotListener }
                 _transactions.value = snap?.documents?.map { d ->
@@ -205,7 +204,7 @@ class ExpenseViewModel : ViewModel() {
     }
 
     private fun listenBudgets() {
-        db.collection("settings").document("budgets").addSnapshotListener { snap, _ ->
+        settingsDoc().document("budgets").addSnapshotListener { snap, _ ->
             if (snap != null && snap.exists())
                 _budgets.value = snap.data?.mapValues { (it.value as? Number)?.toDouble() ?: 0.0 } ?: emptyMap()
         }
@@ -213,7 +212,7 @@ class ExpenseViewModel : ViewModel() {
 
     @Suppress("UNCHECKED_CAST")
     private fun listenRecurring() {
-        db.collection("settings").document("recurring").addSnapshotListener { snap, _ ->
+        settingsDoc().document("recurring").addSnapshotListener { snap, _ ->
             if (snap != null && snap.exists()) {
                 val list = snap.get("list") as? List<Map<String, Any>> ?: emptyList()
                 _recurring.value = list.map { m ->
@@ -233,7 +232,7 @@ class ExpenseViewModel : ViewModel() {
 
     // ── Write ──────────────────────────────────────────────────
     fun save(type: String, categoryId: String, amount: Double, note: String, receiptB64: String? = null) {
-        db.collection("transactions").add(hashMapOf(
+        txCol().add(hashMapOf(
             "type"        to type,
             "category"    to categoryId,
             "amount"      to amount,
@@ -246,7 +245,7 @@ class ExpenseViewModel : ViewModel() {
     }
 
     fun update(fid: String, type: String, categoryId: String, amount: Double, note: String, date: String, receiptB64: String?) {
-        db.collection("transactions").document(fid).update(mapOf(
+        txCol().document(fid).update(mapOf(
             "type"      to type,
             "category"  to categoryId,
             "amount"    to amount,
@@ -257,18 +256,18 @@ class ExpenseViewModel : ViewModel() {
         )).addOnFailureListener { Log.e("FS", it.message ?: "") }
     }
 
-    fun delete(fid: String) = db.collection("transactions").document(fid).delete()
+    fun delete(fid: String) = txCol().document(fid).delete()
 
     fun saveBudget(catId: String, amount: Double) {
         val updated = _budgets.value.toMutableMap().also { it[catId] = amount }
-        db.collection("settings").document("budgets").set(updated)
+        settingsDoc().document("budgets").set(updated)
     }
 
     fun saveRecurring(item: RecurringItem) {
         val list = _recurring.value.toMutableList()
         val idx = list.indexOfFirst { it.id == item.id }
         if (idx >= 0) list[idx] = item else list.add(item)
-        db.collection("settings").document("recurring").set(mapOf("list" to list.map {
+        settingsDoc().document("recurring").set(mapOf("list" to list.map {
             mapOf("id" to it.id, "type" to it.type, "category" to it.category,
                 "amount" to it.amount, "name" to it.name, "freq" to it.freq, "day" to it.day)
         }))
@@ -276,14 +275,14 @@ class ExpenseViewModel : ViewModel() {
 
     fun deleteRecurring(id: String) {
         val list = _recurring.value.filter { it.id != id }
-        db.collection("settings").document("recurring").set(mapOf("list" to list.map {
+        settingsDoc().document("recurring").set(mapOf("list" to list.map {
             mapOf("id" to it.id, "type" to it.type, "category" to it.category,
                 "amount" to it.amount, "name" to it.name, "freq" to it.freq, "day" to it.day)
         }))
     }
 
     fun applyRecurring(item: RecurringItem) {
-        db.collection("transactions").add(hashMapOf(
+        txCol().add(hashMapOf(
             "type"        to item.type,
             "category"    to item.category,
             "amount"      to item.amount,
@@ -366,9 +365,135 @@ class MainActivity : ComponentActivity() {
                 .map { it[DARK_MODE_KEY] ?: false }
                 .collectAsState(initial = false)
             MyExpenseTrackerTheme(darkTheme = isDark) {
-                ExpenseTrackerApp(
+                AppRoot(
                     isDark   = isDark,
                     onToggle = { scope.launch { applicationContext.dataStore.edit { p -> p[DARK_MODE_KEY] = !isDark } } }
+                )
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  APP ROOT — เช็ค Auth state ก่อน
+// ═══════════════════════════════════════════════════════════════
+
+@Composable
+fun AppRoot(isDark: Boolean, onToggle: () -> Unit) {
+    val auth = Firebase.auth
+    var currentUser by remember { mutableStateOf(auth.currentUser) }
+
+    if (currentUser == null) {
+        AuthScreen(
+            onAuthSuccess = { currentUser = auth.currentUser }
+        )
+    } else {
+        ExpenseTrackerApp(
+            isDark   = isDark,
+            onToggle = onToggle,
+            onLogout = {
+                auth.signOut()
+                currentUser = null
+            }
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  AUTH SCREEN — Login / Register
+// ═══════════════════════════════════════════════════════════════
+
+@Composable
+fun AuthScreen(onAuthSuccess: () -> Unit) {
+    val auth = Firebase.auth
+    val ctx  = LocalContext.current
+    var email    by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var isLogin  by remember { mutableStateOf(true) }
+    var loading  by remember { mutableStateOf(false) }
+    var showPass by remember { mutableStateOf(false) }
+
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Column(
+            Modifier.fillMaxWidth().padding(32.dp).align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Text("💰", fontSize = 56.sp)
+            Text("MyExpenseTracker", fontSize = 24.sp, fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary)
+            Text(if (isLogin) "เข้าสู่ระบบ" else "สมัครสมาชิก",
+                fontSize = 16.sp, color = MaterialTheme.colorScheme.outline)
+
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = email, onValueChange = { email = it.trim() },
+                label = { Text("อีเมล") },
+                leadingIcon = { Icon(Icons.Default.Email, null) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            )
+
+            OutlinedTextField(
+                value = password, onValueChange = { password = it },
+                label = { Text("รหัสผ่าน") },
+                leadingIcon = { Icon(Icons.Default.Lock, null) },
+                trailingIcon = {
+                    IconButton(onClick = { showPass = !showPass }) {
+                        Icon(if (showPass) Icons.Default.VisibilityOff else Icons.Default.Visibility, null)
+                    }
+                },
+                visualTransformation = if (showPass) VisualTransformation.None else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            )
+
+            Button(
+                onClick = {
+                    if (email.isBlank() || password.length < 6) {
+                        Toast.makeText(ctx, "กรุณากรอกอีเมลและรหัสผ่าน (6 ตัวขึ้นไป)", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+                    loading = true
+                    val task = if (isLogin)
+                        auth.signInWithEmailAndPassword(email, password)
+                    else
+                        auth.createUserWithEmailAndPassword(email, password)
+
+                    task.addOnSuccessListener {
+                        loading = false
+                        Toast.makeText(ctx, if (isLogin) "เข้าสู่ระบบสำเร็จ ✓" else "สมัครสำเร็จ ✓", Toast.LENGTH_SHORT).show()
+                        onAuthSuccess()
+                    }.addOnFailureListener { e ->
+                        loading = false
+                        val msg = when {
+                            e.message?.contains("email address is badly formatted") == true -> "รูปแบบอีเมลไม่ถูกต้อง"
+                            e.message?.contains("email address is already in use") == true -> "อีเมลนี้ถูกใช้แล้ว"
+                            e.message?.contains("password is invalid") == true || e.message?.contains("INVALID_LOGIN_CREDENTIALS") == true -> "อีเมลหรือรหัสผ่านไม่ถูกต้อง"
+                            e.message?.contains("no user record") == true -> "ไม่พบบัญชีนี้"
+                            else -> e.message ?: "เกิดข้อผิดพลาด"
+                        }
+                        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(12.dp),
+                enabled = !loading,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0))
+            ) {
+                if (loading) CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.White, strokeWidth = 2.dp)
+                else Text(if (isLogin) "เข้าสู่ระบบ" else "สมัครสมาชิก", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+
+            TextButton(onClick = { isLogin = !isLogin }) {
+                Text(
+                    if (isLogin) "ยังไม่มีบัญชี? สมัครสมาชิก" else "มีบัญชีแล้ว? เข้าสู่ระบบ",
+                    color = MaterialTheme.colorScheme.primary
                 )
             }
         }
@@ -383,12 +508,16 @@ class MainActivity : ComponentActivity() {
 fun ExpenseTrackerApp(
     vm: ExpenseViewModel = viewModel(),
     isDark: Boolean,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    onLogout: () -> Unit
 ) {
     val transactions by vm.transactions.collectAsState()
     val budgets      by vm.budgets.collectAsState()
     val ctx          = LocalContext.current
     val nav          = rememberNavController()
+
+    // เริ่ม listen เมื่อ user login แล้ว
+    LaunchedEffect(Unit) { vm.startListening() }
 
     LaunchedEffect(transactions, budgets) {
         if (transactions.isNotEmpty() && budgets.isNotEmpty())
@@ -397,7 +526,7 @@ fun ExpenseTrackerApp(
 
     Scaffold(bottomBar = { BottomNav(nav) }) { pad ->
         NavHost(nav, startDestination = "home", modifier = Modifier.padding(pad)) {
-            composable("home")    { TransactionListScreen(vm, nav, isDark, onToggle) }
+            composable("home")    { TransactionListScreen(vm, nav, isDark, onToggle, onLogout) }
             composable("add")     { AddEditScreen(vm, nav) }
             composable("edit/{fid}") { back ->
                 val fid = back.arguments?.getString("fid") ?: return@composable
@@ -425,7 +554,7 @@ fun BottomNav(nav: NavController) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  SCREEN 1 — TRANSACTION LIST
+//  SCREEN 1 — TRANSACTION LIST (เพิ่มปุ่ม Logout)
 // ═══════════════════════════════════════════════════════════════
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -434,7 +563,8 @@ fun TransactionListScreen(
     vm: ExpenseViewModel,
     nav: NavController,
     isDark: Boolean,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    onLogout: () -> Unit
 ) {
     val transactions by vm.transactions.collectAsState()
     val cal = Calendar.getInstance()
@@ -445,6 +575,7 @@ fun TransactionListScreen(
     var filterCat by remember { mutableStateOf<String?>(null) }
     var showFilter by remember { mutableStateOf(false) }
     var receiptPreview by remember { mutableStateOf<String?>(null) }
+    var showLogoutDialog by remember { mutableStateOf(false) }
 
     val monthTx = remember(transactions, year, month) { vm.getMonthTx(year, month) }
     val filtered = remember(monthTx, search, filterCat) {
@@ -459,6 +590,15 @@ fun TransactionListScreen(
     }
     val income  = monthTx.filter { it.type == "income"  }.sumOf { it.amount }
     val expense = monthTx.filter { it.type == "expense" }.sumOf { it.amount }
+
+    // Logout confirmation
+    if (showLogoutDialog) AlertDialog(
+        onDismissRequest = { showLogoutDialog = false },
+        title = { Text("ออกจากระบบ?") },
+        text  = { Text("คุณต้องการออกจากระบบใช่ไหม?") },
+        confirmButton = { TextButton({ vm.clearData(); onLogout(); showLogoutDialog = false }) { Text("ออกจากระบบ", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton({ showLogoutDialog = false }) { Text("ยกเลิก") } }
+    )
 
     // Receipt preview dialog
     if (receiptPreview != null) {
@@ -487,11 +627,12 @@ fun TransactionListScreen(
                         Icon(Icons.Default.FilterList, null,
                             tint = if (filterCat != null) MaterialTheme.colorScheme.primary else LocalContentColor.current)
                     }
-                    // CSV Export
                     IconButton(onClick = { exportCSV(ctx, monthTx) }) { Icon(Icons.Default.Download, null) }
-                    // Dark mode toggle
                     IconButton(onClick = onToggle) {
                         Icon(if (isDark) Icons.Default.WbSunny else Icons.Default.DarkMode, null)
+                    }
+                    IconButton(onClick = { showLogoutDialog = true }) {
+                        Icon(Icons.Default.Logout, null, tint = MaterialTheme.colorScheme.error)
                     }
                 }
             )
@@ -502,6 +643,18 @@ fun TransactionListScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            // User email badge
+            item {
+                val email = Firebase.auth.currentUser?.email ?: ""
+                if (email.isNotBlank()) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.AccountCircle, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.outline)
+                        Spacer(Modifier.width(4.dp))
+                        Text(email, fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+                    }
+                }
+            }
+
             // Month nav
             item { MonthNav(year, month,
                 { if (month == 0) { month = 11; year-- } else month-- },
@@ -598,11 +751,9 @@ fun TxItem(tx: Transaction, onEdit: () -> Unit, onDelete: () -> Unit, onReceipt:
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape  = RoundedCornerShape(14.dp)) {
         Row(Modifier.padding(12.dp), Arrangement.spacedBy(11.dp), Alignment.CenterVertically) {
-            // Icon
             Box(Modifier.size(44.dp).clip(RoundedCornerShape(13.dp)).background(cat.color.copy(.22f)), Alignment.Center) {
                 Text(cat.emoji, fontSize = 21.sp)
             }
-            // Info
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(cat.label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
@@ -618,7 +769,6 @@ fun TxItem(tx: Transaction, onEdit: () -> Unit, onDelete: () -> Unit, onReceipt:
                     append(tx.date.takeLast(5).replace("-", "/"))
                 }, fontSize = 11.sp, color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            // Amount + actions
             Column(horizontalAlignment = Alignment.End) {
                 Text("${if (tx.type == "income") "+" else "-"}${formatTHB(tx.amount)}",
                     fontWeight = FontWeight.Bold, fontSize = 15.sp,
@@ -662,12 +812,10 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
     var date       by remember { mutableStateOf(editTx?.date ?: SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())) }
     var receiptB64 by remember { mutableStateOf(editTx?.receipt) }
 
-    // Camera launcher
     var tempBitmap by remember { mutableStateOf<Bitmap?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
         if (bmp != null) {
             val out = ByteArrayOutputStream()
-            // Scale down to ~400px wide to stay under Firestore 1MB limit
             val scale = 400f / bmp.width
             val scaled = Bitmap.createScaledBitmap(bmp, 400, (bmp.height * scale).toInt(), true)
             scaled.compress(Bitmap.CompressFormat.JPEG, 70, out)
@@ -687,7 +835,6 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
             contentPadding = PaddingValues(vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Type toggle
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     listOf("expense" to "💸 รายจ่าย", "income" to "💵 รายรับ").forEach { (t, label) ->
@@ -705,8 +852,6 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
                     }
                 }
             }
-
-            // Amount
             item {
                 OutlinedTextField(value = amount, onValueChange = { amount = it },
                     label = { Text("จำนวนเงิน (บาท)") },
@@ -714,8 +859,6 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
                     textStyle = LocalTextStyle.current.copy(fontSize = 24.sp, fontWeight = FontWeight.Bold),
                     modifier = Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(12.dp))
             }
-
-            // Category
             item {
                 ExposedDropdownMenuBox(expanded, { expanded = !expanded }) {
                     OutlinedTextField(value = "${selectedCat.emoji} ${selectedCat.label}",
@@ -737,30 +880,19 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
                     }
                 }
             }
-
-            // Note
             item {
                 OutlinedTextField(value = note, onValueChange = { note = it },
                     label = { Text("หมายเหตุ") }, modifier = Modifier.fillMaxWidth(),
                     singleLine = true, shape = RoundedCornerShape(12.dp))
             }
-
-            // Date
             item {
                 val cal = Calendar.getInstance()
-                // Parse existing date
-                try {
-                    val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-                    sdf.parse(date)?.let { cal.time = it }
-                } catch (_: Exception) {}
-
+                try { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).parse(date)?.let { cal.time = it } } catch (_: Exception) {}
                 OutlinedTextField(
-                    value = date, onValueChange = {},
-                    readOnly = true,
+                    value = date, onValueChange = {}, readOnly = true,
                     label = { Text("วันที่") }, modifier = Modifier.fillMaxWidth().clickable {
-                        DatePickerDialog(ctx, { _, y, m, d ->
-                            date = "%04d-%02d-%02d".format(y, m + 1, d)
-                        }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show()
+                        DatePickerDialog(ctx, { _, y, m, d -> date = "%04d-%02d-%02d".format(y, m + 1, d) },
+                            cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show()
                     },
                     singleLine = true, shape = RoundedCornerShape(12.dp),
                     leadingIcon = { Icon(Icons.Default.CalendarMonth, null) },
@@ -773,8 +905,6 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
                     )
                 )
             }
-
-            // Receipt camera
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("ใบเสร็จ", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
@@ -786,8 +916,7 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
                                 modifier = Modifier.fillMaxWidth().height(140.dp).clip(RoundedCornerShape(12.dp)),
                                 contentScale = ContentScale.Crop)
                             IconButton({ receiptB64 = null },
-                                modifier = Modifier.align(Alignment.TopEnd)
-                                    .background(Color.Black.copy(.5f), CircleShape)) {
+                                modifier = Modifier.align(Alignment.TopEnd).background(Color.Black.copy(.5f), CircleShape)) {
                                 Icon(Icons.Default.Close, null, tint = Color.White)
                             }
                         }
@@ -800,8 +929,6 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
                     }
                 }
             }
-
-            // Save button
             item {
                 Button(
                     onClick = {
@@ -991,7 +1118,6 @@ fun RecurringScreen(vm: ExpenseViewModel, ctx: Context) {
     var showForm  by remember { mutableStateOf(false) }
     var editItem  by remember { mutableStateOf<RecurringItem?>(null) }
 
-    // Form state
     var rAmt      by remember { mutableStateOf("") }
     var rName     by remember { mutableStateOf("") }
     var rType     by remember { mutableStateOf("expense") }
@@ -1007,7 +1133,6 @@ fun RecurringScreen(vm: ExpenseViewModel, ctx: Context) {
         title = { Text(if (editItem != null) "แก้ไขรายการประจำ" else "เพิ่มรายการประจำ") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // Type
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("expense" to "รายจ่าย", "income" to "รายรับ").forEach { (t, l) ->
                         FilterChip(selected = rType == t, onClick = { rType = t }, label = { Text(l, fontSize = 12.sp) })
@@ -1017,7 +1142,6 @@ fun RecurringScreen(vm: ExpenseViewModel, ctx: Context) {
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = rName, onValueChange = { rName = it }, label = { Text("ชื่อ เช่น ค่าเช่า") },
                     singleLine = true, modifier = Modifier.fillMaxWidth())
-                // Category
                 ExposedDropdownMenuBox(rExpanded, { rExpanded = !rExpanded }) {
                     OutlinedTextField(value = "${rCat.emoji} ${rCat.label}", onValueChange = {}, readOnly = true,
                         label = { Text("หมวดหมู่") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(rExpanded) },
@@ -1026,7 +1150,6 @@ fun RecurringScreen(vm: ExpenseViewModel, ctx: Context) {
                         CATEGORIES.forEach { cat -> DropdownMenuItem(text = { Text("${cat.emoji} ${cat.label}") }, onClick = { rCat = cat; rExpanded = false }) }
                     }
                 }
-                // Frequency
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("monthly" to "รายเดือน", "weekly" to "รายสัปดาห์").forEach { (f, l) ->
                         FilterChip(selected = rFreq == f, onClick = { rFreq = f }, label = { Text(l, fontSize = 12.sp) })
@@ -1076,11 +1199,9 @@ fun RecurringScreen(vm: ExpenseViewModel, ctx: Context) {
                                     fontWeight = FontWeight.Bold, fontSize = 14.sp,
                                     color = if (item.type == "income") Color(0xFF2E7D32) else Color(0xFFC62828))
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    // Apply today
                                     OutlinedButton(onClick = { vm.applyRecurring(item); Toast.makeText(ctx, "บันทึกแล้ว ✓", Toast.LENGTH_SHORT).show() },
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                         modifier = Modifier.height(28.dp)) { Text("บันทึกวันนี้", fontSize = 10.sp) }
-                                    // Delete
                                     IconButton(onClick = { vm.deleteRecurring(item.id) }, modifier = Modifier.size(28.dp)) {
                                         Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
                                     }
@@ -1108,7 +1229,7 @@ fun exportCSV(ctx: Context, transactions: List<Transaction>) {
     }
     try {
         val file = File(ctx.getExternalFilesDir(null), "expense_${System.currentTimeMillis()}.csv")
-        file.writeText("\uFEFF$sb") // UTF-8 BOM สำหรับ Excel
+        file.writeText("\uFEFF$sb")
         val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", file)
         ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
             type = "text/csv"

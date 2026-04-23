@@ -4,6 +4,7 @@
 
 ## ✨ ฟีเจอร์หลัก
 
+- **ระบบสมาชิก** — Login/Register ด้วย Email + Password ผ่าน Firebase Auth ข้อมูลแยกตาม user
 - **บันทึกรายรับ-รายจ่าย** — แยกหมวดหมู่ 8 ประเภท พร้อม emoji
 - **สรุปยอดรายเดือน** — กราฟแท่งเปรียบเทียบ 6 เดือนด้วย MPAndroidChart
 - **ตั้งงบประมาณ** — กำหนดงบแต่ละหมวด พร้อม progress bar แสดงสถานะ
@@ -21,7 +22,8 @@
 |---|---|
 | Kotlin | ภาษาหลัก |
 | Jetpack Compose | UI framework (Material 3) |
-| Firebase Firestore | ฐานข้อมูล realtime |
+| Firebase Auth | ระบบ Login/Register |
+| Firebase Firestore | ฐานข้อมูล realtime (แยกตาม user) |
 | Firebase Cloud Messaging | Push notifications |
 | MPAndroidChart | กราฟแท่งสรุปยอด |
 | DataStore Preferences | เก็บค่า Dark Mode |

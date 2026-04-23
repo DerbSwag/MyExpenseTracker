@@ -48,6 +48,7 @@ dependencies {
 
     // Firebase (ใช้ BOM ตัวล่าสุดตัวเดียว ลบตัวเก่าออก)
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-auth-ktx")
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-messaging-ktx")
 
