@@ -30,6 +30,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -83,6 +86,9 @@ import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.firestore
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -290,14 +296,15 @@ fun ExpenseTrackerApp(vm: ExpenseViewModel = viewModel(), isDark: Boolean, onTog
         composable("summary") { SummaryScreen(vm, walletCurrency) }
         composable("budget") { BudgetScreen(vm, walletCurrency) }
         composable("recur") { RecurringScreen(vm, ctx, walletCurrency) }
+        composable("calendar") { CalendarScreen(vm, nav, walletCurrency) }
     } }
 }
 @Composable fun BottomNav(nav: NavController) { val cur = nav.currentBackStackEntryAsState().value?.destination?.route; NavigationBar {
     NavigationBarItem(cur=="home", { nav.navigate("home") { launchSingleTop = true } }, { Icon(Icons.Default.List, null) }, label = { Text("รายการ") })
     NavigationBarItem(cur=="add", { nav.navigate("add") { launchSingleTop = true } }, { Icon(Icons.Default.Add, null) }, label = { Text("บันทึก") })
+    NavigationBarItem(cur=="calendar", { nav.navigate("calendar") { launchSingleTop = true } }, { Icon(Icons.Default.CalendarMonth, null) }, label = { Text("ปฏิทิน") })
     NavigationBarItem(cur=="summary", { nav.navigate("summary") { launchSingleTop = true } }, { Icon(Icons.Default.BarChart, null) }, label = { Text("สรุป") })
     NavigationBarItem(cur=="budget", { nav.navigate("budget") { launchSingleTop = true } }, { Icon(Icons.Default.AccountBalance, null) }, label = { Text("งบ") })
-    NavigationBarItem(cur=="recur", { nav.navigate("recur") { launchSingleTop = true } }, { Icon(Icons.Default.Refresh, null) }, label = { Text("ประจำ") })
 } }
 
 // ═══════════════════════════════════════════════════════════════
@@ -450,7 +457,37 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
     var type by remember { mutableStateOf(editTx?.type ?: "expense") }; var selCat by remember { mutableStateOf(catById(editTx?.category ?: "food")) }
     var expanded by remember { mutableStateOf(false) }; var date by remember { mutableStateOf(editTx?.date ?: SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).format(Date())) }
     var receiptB64 by remember { mutableStateOf(editTx?.receipt) }; var tempBmp by remember { mutableStateOf<Bitmap?>(null) }
+    var slipScanning by remember { mutableStateOf(false) }; var slipResult by remember { mutableStateOf<String?>(null) }; var slipAmount by remember { mutableStateOf<Double?>(null) }
     val camLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp -> if (bmp != null) { val out = ByteArrayOutputStream(); val s = 400f / bmp.width; val sc = Bitmap.createScaledBitmap(bmp, 400, (bmp.height * s).toInt(), true); sc.compress(Bitmap.CompressFormat.JPEG, 70, out); receiptB64 = Base64.encodeToString(out.toByteArray(), Base64.DEFAULT); tempBmp = sc } }
+    val slipLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
+        if (bmp != null) { slipScanning = true
+            val out = ByteArrayOutputStream(); val s = 400f / bmp.width; val sc = Bitmap.createScaledBitmap(bmp, 400, (bmp.height * s).toInt(), true); sc.compress(Bitmap.CompressFormat.JPEG, 70, out)
+            receiptB64 = Base64.encodeToString(out.toByteArray(), Base64.DEFAULT)
+            val image = InputImage.fromBitmap(bmp, 0)
+            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(image)
+                .addOnSuccessListener { result ->
+                    slipScanning = false; slipResult = result.text
+                    // หาจำนวนเงินจาก OCR text — จับตัวเลขที่มี , หรือ . แล้วเอาตัวใหญ่สุด
+                    val amounts = Regex("(\\d{1,3}(?:[,.]\\d{3})*(?:\\.\\d{1,2})?)").findAll(result.text)
+                        .map { it.value.replace(",","").toDoubleOrNull() ?: 0.0 }.filter { it > 0 }.toList()
+                    slipAmount = amounts.maxOrNull()
+                }
+                .addOnFailureListener { slipScanning = false; Toast.makeText(ctx, "สแกนไม่สำเร็จ: ${it.message}", Toast.LENGTH_SHORT).show() }
+        }
+    }
+    // Slip scan confirm dialog
+    if (slipAmount != null) AlertDialog(
+        onDismissRequest = { slipAmount = null; slipResult = null },
+        title = { Text("🧾 ผลสแกนสลิป") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("จำนวนเงินที่พบ:", fontSize = 13.sp, color = MaterialTheme.colorScheme.outline)
+            Text("${currency.symbol}${NumberFormat.getNumberInstance().format(slipAmount!!)}", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF5C6BC0))
+            if (slipResult != null) { Divider(); Text("ข้อความจากสลิป:", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+                Text(slipResult!!.take(200), fontSize = 10.sp, color = MaterialTheme.colorScheme.outline, maxLines = 6, overflow = TextOverflow.Ellipsis) }
+        } },
+        confirmButton = { TextButton({ amount = slipAmount!!.toLong().toString(); slipAmount = null; slipResult = null }) { Text("ใช้จำนวนนี้ ✓") } },
+        dismissButton = { TextButton({ slipAmount = null; slipResult = null }) { Text("ยกเลิก") } }
+    )
     val voiceLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) { val spoken = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull() ?: return@rememberLauncherForActivityResult
             val parsed = parseVoiceInput(spoken); if (parsed != null) { selCat = catById(parsed.first); amount = parsed.second.toLong().toString(); note = parsed.third; type = if (parsed.first == "salary") "income" else "expense" }
@@ -470,7 +507,12 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
                     colors = OutlinedTextFieldDefaults.colors(disabledTextColor = MaterialTheme.colorScheme.onSurface, disabledBorderColor = MaterialTheme.colorScheme.outline, disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant, disabledLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant)) }
             item { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { Text("ใบเสร็จ", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
                 if (receiptB64 != null) { val bytes = Base64.decode(receiptB64!!, Base64.DEFAULT); val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size); Box { Image(bmp.asImageBitmap(), null, Modifier.fillMaxWidth().height(140.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop); IconButton({ receiptB64 = null }, Modifier.align(Alignment.TopEnd).background(Color.Black.copy(.5f), CircleShape)) { Icon(Icons.Default.Close, null, tint = Color.White) } } }
-                OutlinedButton({ camLauncher.launch(null) }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) { Icon(Icons.Default.CameraAlt, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text(if (receiptB64 != null) "ถ่ายใหม่" else "ถ่ายรูปใบเสร็จ") } } }
+                OutlinedButton({ camLauncher.launch(null) }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) { Icon(Icons.Default.CameraAlt, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text(if (receiptB64 != null) "ถ่ายใหม่" else "ถ่ายรูปใบเสร็จ") }
+                OutlinedButton({ slipLauncher.launch(null) }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF5C6BC0))) {
+                    if (slipScanning) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)); Text("กำลังสแกน...") }
+                    else { Icon(Icons.Default.DocumentScanner, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("📱 สแกนสลิป (OCR)") }
+                } } }
             item { Button({ val amt = amount.toDoubleOrNull(); if (amt == null || amt <= 0) { Toast.makeText(ctx,"กรุณากรอกจำนวนเงิน",Toast.LENGTH_SHORT).show(); return@Button }
                 if (isEdit) vm.update(editTx!!.fid, type, selCat.id, amt, note, date, receiptB64) else vm.save(type, selCat.id, amt, note, receiptB64)
                 Toast.makeText(ctx, if (isEdit) "แก้ไขสำเร็จ ✓" else "บันทึกสำเร็จ! 🎉", Toast.LENGTH_SHORT).show(); nav.navigate("home") { launchSingleTop = true }
@@ -568,6 +610,91 @@ fun RecurringScreen(vm: ExpenseViewModel, ctx: Context, cur: CurrencyInfo) {
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) { Text("${if (item.type == "income") "+" else "-"}${formatMoney(item.amount, cur)}", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = if (item.type == "income") Color(0xFF2E7D32) else Color(0xFFC62828))
                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { OutlinedButton({ vm.applyRecurring(item); Toast.makeText(ctx,"บันทึกแล้ว ✓",Toast.LENGTH_SHORT).show() }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), modifier = Modifier.height(28.dp)) { Text("บันทึกวันนี้", fontSize = 10.sp) }
                                 IconButton({ delConfirm = item }, Modifier.size(28.dp)) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp)) } } } } } }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SCREEN 6 — CALENDAR VIEW (ปฏิทินรายวัน)
+// ═══════════════════════════════════════════════════════════════
+@OptIn(ExperimentalMaterial3Api::class) @Composable
+fun CalendarScreen(vm: ExpenseViewModel, nav: NavController, cur: CurrencyInfo) {
+    val tx by vm.transactions.collectAsState(); val cal = Calendar.getInstance()
+    var year by remember { mutableStateOf(cal.get(Calendar.YEAR)) }; var month by remember { mutableStateOf(cal.get(Calendar.MONTH)) }
+    var selectedDay by remember { mutableStateOf<Int?>(null) }
+    val monthTx = remember(tx, year, month) { vm.getMonthTx(year, month) }
+    // สร้าง map วันที่ → รายการ
+    val dayMap = remember(monthTx) { monthTx.groupBy { it.date.takeLast(2).toIntOrNull() ?: 0 } }
+    // หาจำนวนวันในเดือน + วันแรกของเดือนเริ่มวันอะไร
+    val calMonth = remember(year, month) { Calendar.getInstance().apply { set(year, month, 1) } }
+    val daysInMonth = calMonth.getActualMaximum(Calendar.DAY_OF_MONTH)
+    val firstDayOfWeek = (calMonth.get(Calendar.DAY_OF_WEEK) + 5) % 7 // จันทร์ = 0
+    val dayTx = if (selectedDay != null) dayMap[selectedDay] ?: emptyList() else emptyList()
+
+    Scaffold(topBar = { TopAppBar(title = { Text("📅 ปฏิทิน", fontWeight = FontWeight.Bold) }) }) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp)) {
+            MonthNav(year, month, { if (month == 0) { month = 11; year-- } else month--; selectedDay = null }, { if (month == 11) { month = 0; year++ } else month++; selectedDay = null })
+            Spacer(Modifier.height(8.dp))
+            // Day of week headers
+            Row(Modifier.fillMaxWidth()) { listOf("จ","อ","พ","พฤ","ศ","ส","อา").forEach { d ->
+                Box(Modifier.weight(1f), Alignment.Center) { Text(d, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.outline) }
+            } }
+            Spacer(Modifier.height(4.dp))
+            // Calendar grid
+            val totalCells = firstDayOfWeek + daysInMonth
+            val rows = (totalCells + 6) / 7
+            for (row in 0 until rows) {
+                Row(Modifier.fillMaxWidth().height(52.dp)) {
+                    for (col in 0..6) {
+                        val idx = row * 7 + col
+                        val day = idx - firstDayOfWeek + 1
+                        if (day in 1..daysInMonth) {
+                            val hasTx = dayMap.containsKey(day)
+                            val isSelected = selectedDay == day
+                            val dayIncome = dayMap[day]?.filter { it.type == "income" }?.sumOf { it.amount } ?: 0.0
+                            val dayExpense = dayMap[day]?.filter { it.type == "expense" }?.sumOf { it.amount } ?: 0.0
+                            val isToday = day == cal.get(Calendar.DAY_OF_MONTH) && month == cal.get(Calendar.MONTH) && year == cal.get(Calendar.YEAR)
+                            Box(Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(8.dp))
+                                .background(when { isSelected -> MaterialTheme.colorScheme.primaryContainer; isToday -> MaterialTheme.colorScheme.tertiaryContainer.copy(.5f); else -> Color.Transparent })
+                                .clickable { selectedDay = if (selectedDay == day) null else day }, Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("$day", fontSize = 14.sp, fontWeight = if (isToday || isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                    if (hasTx) {
+                                        if (dayExpense > 0) Text("-${cur.symbol}${NumberFormat.getNumberInstance().apply { maximumFractionDigits = 0 }.format(dayExpense)}", fontSize = 8.sp, color = Color(0xFFC62828), maxLines = 1)
+                                        else if (dayIncome > 0) Text("+${cur.symbol}${NumberFormat.getNumberInstance().apply { maximumFractionDigits = 0 }.format(dayIncome)}", fontSize = 8.sp, color = Color(0xFF2E7D32), maxLines = 1)
+                                    }
+                                }
+                            }
+                        } else Box(Modifier.weight(1f))
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            // Selected day transactions
+            if (selectedDay != null) {
+                Text("${selectedDay} ${MONTH_TH[month]} ${year + 543}", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                Spacer(Modifier.height(8.dp))
+                if (dayTx.isEmpty()) Text("ไม่มีรายการ", color = MaterialTheme.colorScheme.outline, fontSize = 13.sp)
+                else LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                    items(dayTx, key = { it.fid }) { t -> TxItem(t, cur, { nav.navigate("edit/${t.fid}") }, { vm.delete(t.fid) }, {}) }
+                }
+            } else {
+                // สรุปเดือน
+                val totalIncome = monthTx.filter { it.type == "income" }.sumOf { it.amount }
+                val totalExpense = monthTx.filter { it.type == "expense" }.sumOf { it.amount }
+                Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("สรุปเดือน ${MONTH_TH[month]} ${year + 543}", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                            Column { Text("รายรับ", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline); Text("+${formatMoney(totalIncome, cur)}", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold) }
+                            Column { Text("รายจ่าย", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline); Text("-${formatMoney(totalExpense, cur)}", color = Color(0xFFC62828), fontWeight = FontWeight.Bold) }
+                            Column { Text("คงเหลือ", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline); Text(formatMoney(totalIncome - totalExpense, cur), fontWeight = FontWeight.Bold, color = if (totalIncome >= totalExpense) Color(0xFF2E7D32) else Color(0xFFC62828)) }
+                        }
+                    }
+                }
+            }
         }
     }
 }
