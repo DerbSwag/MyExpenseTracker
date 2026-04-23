@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">MyExpenseTracker</string>
+    <!-- TODO: Replace with your actual Web Client ID from Firebase Console or add google-services.json -->
+    <string name="default_web_client_id" translatable="false">YOUR_WEB_CLIENT_ID.apps.googleusercontent.com</string>
 </resources>
