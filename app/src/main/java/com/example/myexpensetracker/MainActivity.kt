@@ -106,6 +106,7 @@ val DARK_MODE_KEY = booleanPreferencesKey("dark_mode")
 val BIOMETRIC_KEY = booleanPreferencesKey("biometric_lock")
 val CURRENCY_KEY = stringPreferencesKey("currency")
 val WALLET_KEY = stringPreferencesKey("active_wallet")
+val ONBOARDED_KEY = booleanPreferencesKey("onboarded")
 
 // ═══════════════════════════════════════════════════════════════
 //  CONSTANTS
@@ -144,6 +145,7 @@ class ExpenseViewModel : ViewModel() {
     private val _recurring = MutableStateFlow<List<RecurringItem>>(emptyList()); val recurring: StateFlow<List<RecurringItem>> = _recurring
     private val _savingsGoal = MutableStateFlow(SavingsGoal()); val savingsGoal: StateFlow<SavingsGoal> = _savingsGoal
     private val _wallets = MutableStateFlow<List<Wallet>>(emptyList()); val wallets: StateFlow<List<Wallet>> = _wallets
+    private val _isLoading = MutableStateFlow(true); val isLoading: StateFlow<Boolean> = _isLoading
     val shownAlerts = mutableSetOf<String>()
     private val uid: String? get() = auth.currentUser?.uid
     private var _activeWallet = MutableStateFlow("default"); val activeWallet: StateFlow<String> = _activeWallet
@@ -157,7 +159,8 @@ class ExpenseViewModel : ViewModel() {
     fun startListening() { if (uid == null) return; listenTransactions(); listenBudgets(); listenRecurring(); listenSavings(); listenWallets() }
     fun clearData() { _transactions.value = emptyList(); _budgets.value = emptyMap(); _recurring.value = emptyList(); _savingsGoal.value = SavingsGoal(); _wallets.value = emptyList(); shownAlerts.clear() }
 
-    private fun listenTransactions() { txCol().orderBy("createdAt", Query.Direction.DESCENDING).addSnapshotListener { snap, err ->
+    private fun listenTransactions() { _isLoading.value = true; txCol().orderBy("createdAt", Query.Direction.DESCENDING).addSnapshotListener { snap, err ->
+        _isLoading.value = false
         if (err != null) { Log.e("FS", err.message ?: ""); return@addSnapshotListener }
         _transactions.value = snap?.documents?.map { d -> Transaction(d.id, d.getString("type")?:"expense", d.getString("category")?:"other", d.getDouble("amount")?:0.0, d.getString("note")?:"", d.getString("date")?:"", d.getLong("createdAt")?:0L, d.getBoolean("isRecurring")?:false, d.getString("receipt")) } ?: emptyList()
     } }
@@ -234,18 +237,24 @@ class MainActivity : FragmentActivity() {
             val bioEnabled by applicationContext.dataStore.data.map { it[BIOMETRIC_KEY] ?: false }.collectAsState(initial = false)
             val curCode by applicationContext.dataStore.data.map { it[CURRENCY_KEY] ?: "THB" }.collectAsState(initial = "THB")
             val walletId by applicationContext.dataStore.data.map { it[WALLET_KEY] ?: "default" }.collectAsState(initial = "default")
+            val onboarded by applicationContext.dataStore.data.map { it[ONBOARDED_KEY] ?: false }.collectAsState(initial = false)
             val currency = CURRENCIES.find { it.code == curCode } ?: CURRENCIES[0]
             MyExpenseTrackerTheme(darkTheme = isDark) { AppRoot(isDark, { scope.launch { applicationContext.dataStore.edit { it[DARK_MODE_KEY] = !isDark } } },
                 bioEnabled, { scope.launch { applicationContext.dataStore.edit { it[BIOMETRIC_KEY] = !bioEnabled } } },
                 currency, { c -> scope.launch { applicationContext.dataStore.edit { it[CURRENCY_KEY] = c.code } } },
-                walletId, { w -> scope.launch { applicationContext.dataStore.edit { it[WALLET_KEY] = w } } }, this) }
+                walletId, { w -> scope.launch { applicationContext.dataStore.edit { it[WALLET_KEY] = w } } },
+                onboarded, { scope.launch { applicationContext.dataStore.edit { it[ONBOARDED_KEY] = true } } }, this) }
         }
     }
 }
 
 @Composable
-fun AppRoot(isDark: Boolean, onToggle: () -> Unit, bioEnabled: Boolean, onBioToggle: () -> Unit, currency: CurrencyInfo, onCurChange: (CurrencyInfo) -> Unit, walletId: String, onWalletChange: (String) -> Unit, activity: FragmentActivity) {
+fun AppRoot(isDark: Boolean, onToggle: () -> Unit, bioEnabled: Boolean, onBioToggle: () -> Unit, currency: CurrencyInfo, onCurChange: (CurrencyInfo) -> Unit, walletId: String, onWalletChange: (String) -> Unit, onboarded: Boolean, onOnboarded: () -> Unit, activity: FragmentActivity) {
     val auth = Firebase.auth; var currentUser by remember { mutableStateOf(auth.currentUser) }; var bioPassed by remember { mutableStateOf(!bioEnabled) }
+
+    // Onboarding screen
+    if (!onboarded) { OnboardingScreen(onOnboarded); return }
+
     if (currentUser != null && bioEnabled && !bioPassed) {
         LaunchedEffect(Unit) { val executor: Executor = ContextCompat.getMainExecutor(activity)
             BiometricPrompt(activity, executor, object : BiometricPrompt.AuthenticationCallback() {
@@ -284,11 +293,15 @@ fun AuthScreen(onSuccess: () -> Unit) { val auth = Firebase.auth; val ctx = Loca
 @Composable
 fun ExpenseTrackerApp(vm: ExpenseViewModel = viewModel(), isDark: Boolean, onToggle: () -> Unit, onLogout: () -> Unit, bioEnabled: Boolean, onBioToggle: () -> Unit, currency: CurrencyInfo, onCurChange: (CurrencyInfo) -> Unit, walletId: String, onWalletChange: (String) -> Unit) {
     val tx by vm.transactions.collectAsState(); val budgets by vm.budgets.collectAsState(); val wallets by vm.wallets.collectAsState()
+    val loading by vm.isLoading.collectAsState()
     val ctx = LocalContext.current; val nav = rememberNavController()
     val activeWallet = wallets.find { it.id == walletId } ?: Wallet("default","กระเป๋าหลัก","💼","THB",1.0,0.0)
     val walletCurrency = CURRENCIES.find { it.code == activeWallet.currency } ?: currency
     LaunchedEffect(walletId) { vm.setActiveWallet(walletId) }
     LaunchedEffect(tx, budgets) { if (tx.isNotEmpty() && budgets.isNotEmpty()) checkBudgetNotifications(ctx, tx, budgets, vm.shownAlerts, walletCurrency) }
+    // Loading state
+    if (loading) { Box(Modifier.fillMaxSize(), Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        CircularProgressIndicator(color = Color(0xFF5C6BC0)); Spacer(Modifier.height(16.dp)); Text("กำลังโหลดข้อมูล...", color = MaterialTheme.colorScheme.outline) } }; return }
     Scaffold(bottomBar = { BottomNav(nav) }) { pad -> NavHost(nav, "home", Modifier.padding(pad)) {
         composable("home") { TransactionListScreen(vm, nav, isDark, onToggle, onLogout, bioEnabled, onBioToggle, walletCurrency, onCurChange, wallets, walletId, onWalletChange, activeWallet) }
         composable("add") { AddEditScreen(vm, nav, currency = walletCurrency) }
@@ -711,3 +724,37 @@ fun exportCSV(ctx: Context, tx: List<Transaction>, cur: CurrencyInfo) {
 }
 @Composable fun MonthNav(year: Int, month: Int, onPrev: () -> Unit, onNext: () -> Unit) { Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { IconButton(onPrev) { Text("‹", fontSize = 24.sp) }; Text("${MONTH_TH[month]} ${year + 543}", fontSize = 16.sp, fontWeight = FontWeight.Bold); IconButton(onNext) { Text("›", fontSize = 24.sp) } } }
 @Composable fun AmountLabel(label: String, value: String, color: Color) { Column { Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(.6f)); Text(value, color = color, fontWeight = FontWeight.SemiBold, fontSize = 14.sp) } }
+
+
+// ═══════════════════════════════════════════════════════════════
+//  ONBOARDING SCREEN
+// ═══════════════════════════════════════════════════════════════
+@Composable
+fun OnboardingScreen(onDone: () -> Unit) {
+    var page by remember { mutableStateOf(0) }
+    val pages = listOf(
+        Triple("💰", "ยินดีต้อนรับ!", "บันทึกรายรับ-รายจ่ายง่ายๆ\nแค่กดหรือพูดก็บันทึกได้"),
+        Triple("📊", "ควบคุมการเงิน", "ดูสรุปแบบกราฟ ตั้งงบประมาณ\nแจ้งเตือนเมื่อใกล้เกินงบ"),
+        Triple("👛", "หลายกระเป๋า", "แยกบัญชีตามทริป ครอบครัว\nรองรับหลายสกุลเงิน + อัตราแลกเปลี่ยน"),
+        Triple("🧾", "สแกนสลิป", "ถ่ายรูปสลิป OCR อ่านจำนวนเงินให้\nพร้อมปฏิทินดูรายการรายวัน"),
+    )
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Column(Modifier.fillMaxWidth().padding(40.dp).align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            Text(pages[page].first, fontSize = 72.sp)
+            Text(pages[page].second, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text(pages[page].third, fontSize = 15.sp, color = MaterialTheme.colorScheme.outline, lineHeight = 22.sp, modifier = Modifier.padding(horizontal = 16.dp))
+            Spacer(Modifier.height(16.dp))
+            // Dots
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { pages.indices.forEach { i ->
+                Box(Modifier.size(if (i == page) 10.dp else 8.dp).clip(CircleShape).background(if (i == page) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(.3f)))
+            } }
+            Spacer(Modifier.height(24.dp))
+            if (page < pages.lastIndex) {
+                Button({ page++ }, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0))) { Text("ถัดไป", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+                TextButton({ onDone() }) { Text("ข้าม", color = MaterialTheme.colorScheme.outline) }
+            } else {
+                Button({ onDone() }, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0))) { Text("เริ่มใช้งาน 🚀", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+            }
+        }
+    }
+}
