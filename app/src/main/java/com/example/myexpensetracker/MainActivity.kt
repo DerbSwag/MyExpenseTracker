@@ -24,6 +24,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -80,7 +81,10 @@ import com.github.mikephil.charting.components.XAxis
 import com.github.mikephil.charting.data.*
 import com.github.mikephil.charting.formatter.IndexAxisValueFormatter
 import com.github.mikephil.charting.formatter.PercentFormatter
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.firebase.Firebase
+import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.firestore
@@ -288,21 +292,77 @@ fun AppRoot(isDark: Boolean, onToggle: () -> Unit, bioEnabled: Boolean, onBioTog
 //  AUTH SCREEN
 // ═══════════════════════════════════════════════════════════════
 @Composable
-fun AuthScreen(onSuccess: () -> Unit) { val auth = Firebase.auth; val ctx = LocalContext.current; var email by remember { mutableStateOf("") }; var pw by remember { mutableStateOf("") }; var isLogin by remember { mutableStateOf(true) }; var loading by remember { mutableStateOf(false) }; var showPw by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) { Column(Modifier.fillMaxWidth().padding(32.dp).align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("💰", fontSize = 56.sp); Text("MyExpenseTracker", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-        Text(if (isLogin) "เข้าสู่ระบบ" else "สมัครสมาชิก", fontSize = 16.sp, color = MaterialTheme.colorScheme.outline); Spacer(Modifier.height(8.dp))
-        OutlinedTextField(email, { email = it.trim() }, label = { Text("อีเมล") }, leadingIcon = { Icon(Icons.Default.Email, null) }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email), singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
-        OutlinedTextField(pw, { pw = it }, label = { Text("รหัสผ่าน") }, leadingIcon = { Icon(Icons.Default.Lock, null) }, trailingIcon = { IconButton({ showPw = !showPw }) { Icon(if (showPw) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } },
-            visualTransformation = if (showPw) VisualTransformation.None else PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
-        Button({ if (email.isBlank() || pw.length < 6) { Toast.makeText(ctx,"กรุณากรอกอีเมลและรหัสผ่าน (6 ตัวขึ้นไป)",Toast.LENGTH_SHORT).show(); return@Button }; loading = true
-            (if (isLogin) auth.signInWithEmailAndPassword(email, pw) else auth.createUserWithEmailAndPassword(email, pw))
-                .addOnSuccessListener { loading = false; Toast.makeText(ctx, if (isLogin) "เข้าสู่ระบบสำเร็จ ✓" else "สมัครสำเร็จ ✓", Toast.LENGTH_SHORT).show(); onSuccess() }
-                .addOnFailureListener { e -> loading = false; Toast.makeText(ctx, when { e.message?.contains("badly formatted")==true -> "รูปแบบอีเมลไม่ถูกต้อง"; e.message?.contains("already in use")==true -> "อีเมลนี้ถูกใช้แล้ว"; e.message?.contains("INVALID_LOGIN")==true -> "อีเมลหรือรหัสผ่านไม่ถูกต้อง"; else -> e.message ?: "เกิดข้อผิดพลาด" }, Toast.LENGTH_LONG).show() }
-        }, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(12.dp), enabled = !loading, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0))) {
-            if (loading) CircularProgressIndicator(Modifier.size(24.dp), Color.White, strokeWidth = 2.dp) else Text(if (isLogin) "เข้าสู่ระบบ" else "สมัครสมาชิก", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
-        TextButton({ isLogin = !isLogin }) { Text(if (isLogin) "ยังไม่มีบัญชี? สมัครสมาชิก" else "มีบัญชีแล้ว? เข้าสู่ระบบ", color = MaterialTheme.colorScheme.primary) }
-    } }
+fun AuthScreen(onSuccess: () -> Unit) { 
+    val auth = Firebase.auth
+    val ctx = LocalContext.current
+    var email by remember { mutableStateOf("") }
+    var pw by remember { mutableStateOf("") }
+    var isLogin by remember { mutableStateOf(true) }
+    var loading by remember { mutableStateOf(false) }
+    var showPw by remember { mutableStateOf(false) }
+
+    // Google Sign-In Setup
+    val gso = remember {
+        GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            // ✅ ต้องมี google-services.json ที่ถูกต้อง และ SHA-1 ใน Firebase Console
+            // หาก R.string.default_web_client_id แดง ให้ลอง Build > Clean Project หรือใส่ Client ID ตรงๆ
+            .requestIdToken(ctx.getString(R.string.default_web_client_id))
+            .requestEmail()
+            .build()
+    }
+    val googleSignInClient = remember { GoogleSignIn.getClient(ctx, gso) }
+    val googleLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+            try {
+                val account = task.getResult(com.google.android.gms.common.api.ApiException::class.java)!!
+                val credential = GoogleAuthProvider.getCredential(account.idToken, null)
+                loading = true
+                auth.signInWithCredential(credential).addOnSuccessListener { 
+                    loading = false
+                    Toast.makeText(ctx, "เข้าสู่ระบบด้วย Google สำเร็จ ✓", Toast.LENGTH_SHORT).show()
+                    onSuccess()
+                }.addOnFailureListener { loading = false; Toast.makeText(ctx, "Google Login Failed: ${it.message}", Toast.LENGTH_LONG).show() }
+            } catch (e: Exception) { Toast.makeText(ctx, "Google Error: ${e.message}", Toast.LENGTH_SHORT).show() }
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) { 
+        Column(Modifier.fillMaxWidth().padding(32.dp).align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("💰", fontSize = 56.sp); Text("MyExpenseTracker", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text(if (isLogin) "เข้าสู่ระบบ" else "สมัครสมาชิก", fontSize = 16.sp, color = MaterialTheme.colorScheme.outline); Spacer(Modifier.height(8.dp))
+            
+            // Google Login Button
+            OutlinedButton(
+                onClick = { googleLauncher.launch(googleSignInClient.signInIntent) },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(12.dp),
+                enabled = !loading,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.AccountCircle, null, tint = Color(0xFF4285F4))
+                    Spacer(Modifier.width(8.dp))
+                    Text("เข้าสู่ระบบด้วย Google", color = MaterialTheme.colorScheme.onSurface)
+                }
+            }
+            
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+                HorizontalDivider(Modifier.weight(1f)); Text(" หรือ ", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(horizontal = 8.dp)); HorizontalDivider(Modifier.weight(1f))
+            }
+
+            OutlinedTextField(email, { email = it.trim() }, label = { Text("อีเมล") }, leadingIcon = { Icon(Icons.Default.Email, null) }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email), singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
+            OutlinedTextField(pw, { pw = it }, label = { Text("รหัสผ่าน") }, leadingIcon = { Icon(Icons.Default.Lock, null) }, trailingIcon = { IconButton({ showPw = !showPw }) { Icon(if (showPw) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) } },
+                visualTransformation = if (showPw) VisualTransformation.None else PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp))
+            Button({ if (email.isBlank() || pw.length < 6) { Toast.makeText(ctx,"กรุณากรอกอีเมลและรหัสผ่าน (6 ตัวขึ้นไป)",Toast.LENGTH_SHORT).show(); return@Button }; loading = true
+                (if (isLogin) auth.signInWithEmailAndPassword(email, pw) else auth.createUserWithEmailAndPassword(email, pw))
+                    .addOnSuccessListener { loading = false; Toast.makeText(ctx, if (isLogin) "เข้าสู่ระบบสำเร็จ ✓" else "สมัครสมาชิกสำเร็จ ✓", Toast.LENGTH_SHORT).show(); onSuccess() }
+                    .addOnFailureListener { e -> loading = false; Toast.makeText(ctx, when { e.message?.contains("badly formatted")==true -> "รูปแบบอีเมลไม่ถูกต้อง"; e.message?.contains("already in use")==true -> "อีเมลนี้ถูกใช้แล้ว"; e.message?.contains("INVALID_LOGIN")==true -> "อีเมลหรือรหัสผ่านไม่ถูกต้อง"; else -> e.message ?: "เกิดข้อผิดพลาด" }, Toast.LENGTH_LONG).show() }
+            }, Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(12.dp), enabled = !loading, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0))) {
+                if (loading) CircularProgressIndicator(Modifier.size(24.dp), Color.White, strokeWidth = 2.dp) else Text(if (isLogin) "เข้าสู่ระบบ" else "สมัครสมาชิก", fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+            TextButton({ isLogin = !isLogin }) { Text(if (isLogin) "ยังไม่มีบัญชี? สมัครสมาชิก" else "มีบัญชีแล้ว? เข้าสู่ระบบ", color = MaterialTheme.colorScheme.primary) }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
