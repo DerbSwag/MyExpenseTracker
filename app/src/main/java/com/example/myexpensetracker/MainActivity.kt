@@ -232,25 +232,43 @@ fun checkBudgetNotifications(ctx: Context, tx: List<Transaction>, budgets: Map<S
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO), 1001)
-        setContent { val scope = rememberCoroutineScope()
-            val isDark by applicationContext.dataStore.data.map { it[DARK_MODE_KEY] ?: false }.collectAsState(initial = false)
-            val bioEnabled by applicationContext.dataStore.data.map { it[BIOMETRIC_KEY] ?: false }.collectAsState(initial = false)
-            val curCode by applicationContext.dataStore.data.map { it[CURRENCY_KEY] ?: "THB" }.collectAsState(initial = "THB")
-            val walletId by applicationContext.dataStore.data.map { it[WALLET_KEY] ?: "default" }.collectAsState(initial = "default")
-            val onboarded by applicationContext.dataStore.data.map { it[ONBOARDED_KEY] ?: false }.collectAsState(initial = false)
+        setContent {
+            val scope = rememberCoroutineScope()
+            // Avoid calling Flow operators directly in composition — remember the transformed flows
+            val isDarkFlow = remember { applicationContext.dataStore.data.map { it[DARK_MODE_KEY] ?: false } }
+            val bioEnabledFlow = remember { applicationContext.dataStore.data.map { it[BIOMETRIC_KEY] ?: false } }
+            val curCodeFlow = remember { applicationContext.dataStore.data.map { it[CURRENCY_KEY] ?: "THB" } }
+            val walletIdFlow = remember { applicationContext.dataStore.data.map { it[WALLET_KEY] ?: "default" } }
+            val onboardedFlow = remember { applicationContext.dataStore.data.map { it[ONBOARDED_KEY] ?: false } }
+
+            val isDark by isDarkFlow.collectAsState(initial = false)
+            val bioEnabled by bioEnabledFlow.collectAsState(initial = false)
+            val curCode by curCodeFlow.collectAsState(initial = "THB")
+            val walletId by walletIdFlow.collectAsState(initial = "default")
+            val onboarded by onboardedFlow.collectAsState(initial = false)
+
             val currency = CURRENCIES.find { it.code == curCode } ?: CURRENCIES[0]
-            MyExpenseTrackerTheme(darkTheme = isDark) { AppRoot(isDark, { scope.launch { applicationContext.dataStore.edit { it[DARK_MODE_KEY] = !isDark } } },
-                bioEnabled, { scope.launch { applicationContext.dataStore.edit { it[BIOMETRIC_KEY] = !bioEnabled } } },
-                currency, { c -> scope.launch { applicationContext.dataStore.edit { it[CURRENCY_KEY] = c.code } } },
-                walletId, { w -> scope.launch { applicationContext.dataStore.edit { it[WALLET_KEY] = w } } },
-                onboarded, { scope.launch { applicationContext.dataStore.edit { it[ONBOARDED_KEY] = true } } }, this) }
+
+            MyExpenseTrackerTheme(darkTheme = isDark) {
+                AppRoot(isDark,
+                    { scope.launch { applicationContext.dataStore.edit { it[DARK_MODE_KEY] = !isDark } } },
+                    bioEnabled,
+                    { scope.launch { applicationContext.dataStore.edit { it[BIOMETRIC_KEY] = !bioEnabled } } },
+                    currency,
+                    { c -> scope.launch { applicationContext.dataStore.edit { it[CURRENCY_KEY] = c.code } } },
+                    walletId,
+                    { w -> scope.launch { applicationContext.dataStore.edit { it[WALLET_KEY] = w } } },
+                    onboarded,
+                    { scope.launch { applicationContext.dataStore.edit { it[ONBOARDED_KEY] = true } } },
+                    this)
+            }
         }
     }
 }
 
 @Composable
 fun AppRoot(isDark: Boolean, onToggle: () -> Unit, bioEnabled: Boolean, onBioToggle: () -> Unit, currency: CurrencyInfo, onCurChange: (CurrencyInfo) -> Unit, walletId: String, onWalletChange: (String) -> Unit, onboarded: Boolean, onOnboarded: () -> Unit, activity: FragmentActivity) {
-    val auth = Firebase.auth; var currentUser by remember { mutableStateOf(auth.currentUser) }; var bioPassed by remember { mutableStateOf(!bioEnabled) }
+    val auth = Firebase.auth; val vm: ExpenseViewModel = viewModel(); var currentUser by remember { mutableStateOf(auth.currentUser) }; var bioPassed by remember { mutableStateOf(!bioEnabled) }
 
     // Onboarding screen
     if (!onboarded) { OnboardingScreen(onOnboarded); return }
@@ -263,7 +281,7 @@ fun AppRoot(isDark: Boolean, onToggle: () -> Unit, bioEnabled: Boolean, onBioTog
             }).authenticate(BiometricPrompt.PromptInfo.Builder().setTitle("ปลดล็อค MyExpenseTracker").setSubtitle("ใช้ลายนิ้วมือหรือ PIN").setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL).build()) }
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("🔒", fontSize = 48.sp); Spacer(Modifier.height(16.dp)); Text("กรุณาปลดล็อค", fontSize = 18.sp, color = MaterialTheme.colorScheme.outline) } }; return }
     if (currentUser == null) AuthScreen { currentUser = auth.currentUser; bioPassed = true }
-    else ExpenseTrackerApp(isDark, onToggle, { auth.signOut(); currentUser = null }, bioEnabled, onBioToggle, currency, onCurChange, walletId, onWalletChange)
+    else ExpenseTrackerApp(vm, isDark, onToggle, { auth.signOut(); currentUser = null }, bioEnabled, onBioToggle, currency, onCurChange, walletId, onWalletChange)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -518,7 +536,7 @@ fun AddEditScreen(vm: ExpenseViewModel, nav: NavController, editTx: Transaction?
                     Text(if (showSPen) "ซ่อน S Pen" else "✍️ เขียนด้วย S Pen / นิ้ว", fontSize = 13.sp) }
             }
             item { ExposedDropdownMenuBox(expanded, { expanded = !expanded }) { OutlinedTextField("${selCat.emoji} ${selCat.label}", {}, readOnly = true, label = { Text("หมวดหมู่") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) }, modifier = Modifier.menuAnchor().fillMaxWidth(), shape = RoundedCornerShape(12.dp))
-                ExposedDropdownMenu(expanded, { expanded = false }) { CATEGORIES.forEach { c -> DropdownMenuItem({ Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) { Box(Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)).background(c.color.copy(.2f)), Alignment.Center) { Text(c.emoji, fontSize = 15.sp) }; Text(c.label, fontSize = 14.sp) } }, { selCat = c; expanded = false }) } } } }
+                ExposedDropdownMenu(expanded, { expanded = false }) { CATEGORIES.forEach { c -> DropdownMenuItem({ Text("${c.emoji} ${c.label}") }, { selCat = c; expanded = false }) } } } }
             item { OutlinedTextField(note, { note = it }, label = { Text("หมายเหตุ") }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(12.dp)) }
             item { val c = Calendar.getInstance(); try { SimpleDateFormat("yyyy-MM-dd",Locale.getDefault()).parse(date)?.let { c.time = it } } catch (_: Exception) {}
                 OutlinedTextField(date, {}, readOnly = true, label = { Text("วันที่") }, modifier = Modifier.fillMaxWidth().clickable { DatePickerDialog(ctx, { _, y, m, d -> date = "%04d-%02d-%02d".format(y, m + 1, d) }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show() },
@@ -555,20 +573,23 @@ fun SummaryScreen(vm: ExpenseViewModel, cur: CurrencyInfo) {
             item { MonthNav(year, month, { if (month == 0) { month = 11; year-- } else month-- }, { if (month == 11) { month = 0; year++ } else month++ }) }
             item { Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) { Column(Modifier.padding(12.dp)) { Text("รายรับ-รายจ่าย 6 เดือน", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(bottom = 8.dp))
                 AndroidView({ ctx -> BarChart(ctx).apply { description.isEnabled = false; legend.isEnabled = true; setDrawGridBackground(false); setTouchEnabled(false); xAxis.apply { position = XAxis.XAxisPosition.BOTTOM; setDrawGridLines(false); granularity = 1f; textSize = 11f }; axisLeft.apply { setDrawGridLines(true); textSize = 10f }; axisRight.isEnabled = false } },
+                    Modifier.fillMaxWidth().height(200.dp),
                     { chart -> val labels = chartData.map { it.first }; val dsI = BarDataSet(chartData.mapIndexed { i, d -> BarEntry(i * 2f, d.second) },"รายรับ").apply { color = Color(0xFF4CAF50).toArgb(); valueTextSize = 0f }; val dsE = BarDataSet(chartData.mapIndexed { i, d -> BarEntry(i * 2f + 1f, d.third) },"รายจ่าย").apply { color = Color(0xFFF44336).toArgb(); valueTextSize = 0f }
-                        chart.data = BarData(dsI, dsE).apply { barWidth = 0.4f }; chart.xAxis.valueFormatter = IndexAxisValueFormatter(labels.flatMap { listOf(it,"") }); chart.invalidate() }, Modifier.fillMaxWidth().height(200.dp)) } } }
+                        chart.data = BarData(dsI, dsE).apply { barWidth = 0.4f }; chart.xAxis.valueFormatter = IndexAxisValueFormatter(labels.flatMap { listOf(it,"") }); chart.invalidate() })
+            } } }
             if (catSum.isNotEmpty()) item { Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)) { Column(Modifier.padding(12.dp)) { Text("สัดส่วนรายจ่าย", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(bottom = 8.dp))
                 AndroidView({ ctx -> PieChart(ctx).apply { description.isEnabled = false; isDrawHoleEnabled = true; holeRadius = 45f; transparentCircleRadius = 50f; setUsePercentValues(true); legend.isEnabled = true; setEntryLabelTextSize(10f) } },
-                    { chart -> val entries = catSum.map { (c, s, _) -> PieEntry(s.toFloat(), c.emoji) }; val ds = PieDataSet(entries,"").apply { colors = catSum.map { it.first.color.toArgb() }; valueTextSize = 11f; valueFormatter = PercentFormatter(chart); sliceSpace = 2f }; chart.data = PieData(ds); chart.invalidate() }, Modifier.fillMaxWidth().height(220.dp)) } } }
+                    Modifier.fillMaxWidth().height(220.dp),
+                    { chart -> val entries = catSum.map { (c, s, _) -> PieEntry(s.toFloat(), c.emoji) }; val ds = PieDataSet(entries,"").apply { colors = catSum.map { it.first.color.toArgb() }; valueTextSize = 11f; valueFormatter = PercentFormatter(chart); sliceSpace = 2f }; chart.data = PieData(ds); chart.invalidate() })
+            } } }
             item { Text("หมวดหมู่รายจ่าย", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = MaterialTheme.colorScheme.outline) }
             if (catSum.isEmpty()) item { Box(Modifier.fillMaxWidth().padding(20.dp), Alignment.Center) { Text("ยังไม่มีรายจ่าย", color = MaterialTheme.colorScheme.outline) } }
             else items(catSum) { (cat, spent, bdg) -> val isOver = bdg > 0 && spent > bdg; val pct = if (bdg > 0) (spent / bdg).coerceAtMost(1.0).toFloat() else 0f
-                Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = if (isOver) MaterialTheme.colorScheme.errorContainer.copy(.3f) else MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(13.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) { Box(Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).background(cat.color.copy(.2f)), Alignment.Center) { Text(cat.emoji, fontSize = 18.sp) }
-                        Column(Modifier.weight(1f)) { Text(cat.label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp); if (bdg > 0) Text("${formatMoney(spent,cur)} / ${formatMoney(bdg,cur)}", fontSize = 11.sp, color = if (isOver) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline) }
-                        Column(horizontalAlignment = Alignment.End) { Text(formatMoney(spent,cur), fontWeight = FontWeight.Bold, fontSize = 14.sp); Text("${if (totalExp > 0) (spent / totalExp * 100).toInt() else 0}%", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline) } }
-                    if (bdg > 0) { Spacer(Modifier.height(8.dp)); LinearProgressIndicator({ pct }, Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(99.dp)), color = if (isOver) MaterialTheme.colorScheme.error else cat.color, trackColor = MaterialTheme.colorScheme.outline.copy(.15f))
-                        if (isOver) Text("🚨 เกินงบ ${formatMoney(spent - bdg, cur)}", fontSize = 11.sp, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 4.dp)) } } } }
+                Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = if (isOver) MaterialTheme.colorScheme.errorContainer.copy(.3f) else MaterialTheme.colorScheme.surfaceVariant)) {
+                    Column( Modifier.padding(13.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) { Box(Modifier.size(38.dp).clip(RoundedCornerShape(10.dp)).background(cat.color.copy(.2f)), Alignment.Center) { Text(cat.emoji, fontSize = 18.sp) }
+                        Column(Modifier.weight(1f)) { Text(cat.label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp); if (bdg > 0) Text("${formatMoney(spent,cur)} / ${formatMoney(bdg,cur)}", fontSize = 11.sp, color = if (isOver) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline) } }
+                        if (bdg > 0) { Spacer(Modifier.height(8.dp)); LinearProgressIndicator({ pct }, Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(99.dp)), color = if (isOver) MaterialTheme.colorScheme.error else cat.color, trackColor = MaterialTheme.colorScheme.outline.copy(.12f)) } } } }
         }
     }
 }
@@ -581,8 +602,8 @@ fun BudgetScreen(vm: ExpenseViewModel, cur: CurrencyInfo) {
     val budgets by vm.budgets.collectAsState(); val tx by vm.transactions.collectAsState(); val cal = Calendar.getInstance()
     var month by remember { mutableStateOf(cal.get(Calendar.MONTH)) }; var year by remember { mutableStateOf(cal.get(Calendar.YEAR)) }
     val mTx = remember(tx, year, month) { vm.getMonthTx(year, month) }; var editCat by remember { mutableStateOf<Category?>(null) }; var bdgIn by remember { mutableStateOf("") }
-    if (editCat != null) AlertDialog({ editCat = null }, { TextButton({ vm.saveBudget(editCat!!.id, bdgIn.toDoubleOrNull() ?: 0.0); editCat = null }) { Text("บันทึก") } }, dismissButton = { TextButton({ editCat = null }) { Text("ยกเลิก") } },
-        title = { Text("ตั้งงบ ${editCat!!.emoji} ${editCat!!.label}") }, text = { OutlinedTextField(bdgIn, { bdgIn = it }, label = { Text("งบประมาณ (${cur.symbol})") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, modifier = Modifier.fillMaxWidth()) })
+    if (editCat != null) AlertDialog({ editCat = null }, { TextButton({ vm.saveBudget(editCat!!.id, bdgIn.toDoubleOrNull() ?: 0.0); editCat = null }) { Text("บันทึก") } },
+        dismissButton = { TextButton({ editCat = null }) { Text("ยกเลิก") } }, title = { Text("ตั้งงบ ${editCat!!.emoji} ${editCat!!.label}") }, text = { OutlinedTextField(bdgIn, { bdgIn = it }, label = { Text("งบประมาณ (${cur.symbol})") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, modifier = Modifier.fillMaxWidth()) })
     Scaffold(topBar = { TopAppBar(title = { Text("💰 งบประมาณ", fontWeight = FontWeight.Bold) }) }) { pad ->
         LazyColumn(Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item { MonthNav(year, month, { if (month == 0) { month = 11; year-- } else month-- }, { if (month == 11) { month = 0; year++ } else month++ }) }
